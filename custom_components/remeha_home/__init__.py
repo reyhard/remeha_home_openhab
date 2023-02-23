@@ -1,60 +1,70 @@
 """The Remeha Home integration."""
 from __future__ import annotations
+from aiohttp import ClientSession
 
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers import config_entry_oauth2_flow
-from homeassistant.helpers import aiohttp_client
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+import asyncio
+from configparser import ConfigParser
+import sys
+import os
+import time
+from typing import Any, cast
 
-from .api import RemehaHomeOAuth2Implementation, RemehaHomeAPI
-from .config_flow import RemehaHomeLoginFlowHandler
-from .const import DOMAIN
-from .coordinator import RemehaHomeUpdateCoordinator
+from api import RemehaHomeOAuth2Implementation, RemehaHomeAPI, OAuth2Session
 
-PLATFORMS: list[Platform] = [Platform.CLIMATE, Platform.SENSOR]
+def get_config(config_dir):
+    # Load configuration file
+    config = ConfigParser(delimiters=('=', ))
+    config.optionxform = str
+    config.read([os.path.join(config_dir, 'config.ini.dist'), os.path.join(config_dir, 'config.ini')])
+    return config
+
+settings = get_config(sys.path[0])
+base_url = settings['Openhab'].get('openhab_url','')
+
+async def get_token(api_implmentation):
+    #
+    token = settings['General'].get('token',None)
+    if(not await is_refresh_token_valid(token)):
+        return await generate_token(api_implmentation)
+    print("token is still valid")
+    token = eval(token)
+    return token
 
 
-async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up Remeha Home."""
-    hass.data.setdefault(DOMAIN, {})
+async def generate_token(api_implmentation):
+    token = await api_implmentation.async_resolve_external_data()
 
-    RemehaHomeLoginFlowHandler.async_register_implementation(
-        hass,
-        RemehaHomeOAuth2Implementation(async_get_clientsession(hass)),
+    settings['General']['token'] = str(token)
+    with open('config.ini', 'w') as configfile:
+        settings.write(configfile)
+    return token
+
+async def is_refresh_token_valid(token):
+    print(token == None)
+    if(token == None):
+        return False
+    token = eval(token)
+    #print(token["refresh_token_expires_in"])
+    return (
+        cast(float, token["expires_on"]) + cast(float, token["refresh_token_expires_in"])
+            > time.time() + 60
     )
 
-    return True
+async def get_api():
+    print ("start")
+    api_implmentation = RemehaHomeOAuth2Implementation(ClientSession() )
+    print("get token")
+    token = await get_token(api_implmentation)
+    print(token)
+    oauth_session = OAuth2Session(token,api_implmentation)
+    return RemehaHomeAPI( oauth_session)
 
+async def main():
+    api = await get_api()
+    resp = await api.async_get_dashboard()
+    print(resp)
+    #await RemehaHomeOAuth2Implementation.async_resolve_external_data()
+    
+loop = asyncio.get_event_loop()
+loop.run_until_complete(main())
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
-    """Set up Remeha Home from a config entry."""
-    implementation = (
-        await config_entry_oauth2_flow.async_get_config_entry_implementation(
-            hass, entry
-        )
-    )
-
-    oauth_session = config_entry_oauth2_flow.OAuth2Session(hass, entry, implementation)
-    api = RemehaHomeAPI(oauth_session)
-    coordinator = RemehaHomeUpdateCoordinator(hass, api)
-
-    await coordinator.async_config_entry_first_refresh()
-
-    hass.data[DOMAIN][entry.entry_id] = {
-        "api": api,
-        "coordinator": coordinator,
-    }
-
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-    return True
-
-
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
-    if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        hass.data[DOMAIN].pop(entry.entry_id)
-
-    return unload_ok
