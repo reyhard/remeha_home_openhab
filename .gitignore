@@ -1,4 +1,2 @@
-# Byte-compiled / optimized / DLL files
+/custom_components/remeha_home/config.ini
 __pycache__/
-*.py[cod]
-*$py.class
