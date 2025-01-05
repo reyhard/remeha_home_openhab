@@ -91,12 +91,15 @@ async def get_api():
     token = await get_token(api_implmentation)
     #print(token)
     oauth_session = OAuth2Session(token,api_implmentation)
+    #await api_implmentation.close_session()
     return RemehaHomeAPI( oauth_session)
 
 
 def coro(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         return asyncio.get_event_loop().run_until_complete(f(*args, **kwargs))
 
     return wrapper
@@ -108,14 +111,21 @@ def cli():
     BDR Thermea API
     """
     pass
-    
+
+@cli.command()
+@coro
+async def get_connection():
+    print("get status")
+    api = await get_api()
+
 @cli.command()
 @coro
 async def get_status():
     print("get status")
     api = await get_api()
     resp = await api.async_get_dashboard()
-    #print(resp)
+    #await api.async_end_session()
+    print(resp)
     remehaIds = ['applianceId','climateZoneId','hotWaterZoneId']
     for dataId in remehaIds:
         id = settings['General'].get(dataId,None)
@@ -134,17 +144,20 @@ async def get_status():
     item_nextSwitchTemperature = openhab.get_item('Thermostat_NextSwitch_Temperature')
     item_currentTemperature = openhab.get_item('Thermostat_Temperature')
     item_currentSetpoint = openhab.get_item('Thermostat_TemperatureControl')
-    #item_flowTemperature = openhab.get_item('Thermostat_FlowTemperature')
+    item_flowTemperature = openhab.get_item('Thermostat_FlowTemperature')
+    item_waterPressure = openhab.get_item('Thermostat_WaterPressure')
     item_waterMode = openhab.get_item('Thermostat_Water_Mode')
+    item_waterTemperature = openhab.get_item('Thermostat_Water_Temperature')
     item_boilerState = openhab.get_item('Thermostat_BoilerState')
-    
+    item_isUpdated = openhab.get_item('Thermostat_UpdateActive')
+
     appliance = resp["appliances"][0]
     #print(appliance)
     heating = appliance["climateZones"][0]
     #print(heating)
     water = appliance["hotWaterZones"][0]
     #print(water)
-    
+
     # Store Id in config if they are not present
     if( settings['General'].get('applianceId',"") == ""):
         settings['General']['applianceId'] = appliance['applianceId']
@@ -153,8 +166,13 @@ async def get_status():
         with open(os.path.join(sys.path[0], 'config.ini'), 'w') as configfile:
             settings.write(configfile)
 
+    # operatingMode activeThermalMode
     boiler_state = appliance['activeThermalMode']
     item_boilerState.update(str(boiler_state))
+
+    # Get boiler pressure
+    pressure_state = appliance['waterPressure']
+    item_waterPressure.update(str(pressure_state))
 
     mode = heating.get("zoneMode","")
     #print(mode)
@@ -170,10 +188,11 @@ async def get_status():
     # Get current temperature
     currentTemperature = heating.get("roomTemperature","")
     item_currentTemperature.update(currentTemperature)
-    
+
     # Get current setpoint
-    currentSetpointTemperature = heating.get("setPoint","")
-    item_currentSetpoint.update(currentSetpointTemperature)
+    if(item_isUpdated.state == "OFF"):
+        currentSetpointTemperature = heating.get("setPoint","")
+        item_currentSetpoint.update(currentSetpointTemperature)
 
     # Get current program
     program = heating.get("activeHeatingClimateTimeProgramNumber",1)
@@ -182,6 +201,13 @@ async def get_status():
     # Get current water mode
     mode = water.get("dhwZoneMode","")
     item_waterMode.update(str(mode))
+
+    waterTemperature = water.get("dhwTemperature","")
+    if waterTemperature != None:
+        item_flowTemperature.update(str(waterTemperature))
+
+    waterTemperatureTarget = water.get("targetSetpoint","")
+    item_waterTemperature.update(str(waterTemperatureTarget))
 
     # Get current flow temperature
     #resp = await api.get_flow_temperature()
@@ -203,7 +229,7 @@ async def set_temperature(value):
     api = await get_api()
     await api.async_set_temporary_override(settings['General'].get('climateZoneId',""),value)
     print("temperature changed to " + str(value))
-    
+
 @cli.command()
 @click.option('--mode',
               required=True,
@@ -214,7 +240,7 @@ async def set_temperature(value):
 async def set_mode_schedule(mode):
     api = await get_api()
     await api.async_set_mode_schedule(settings['General'].get('climateZoneId',""),mode)
-    
+
 
 @cli.command()
 @coro
@@ -238,6 +264,19 @@ async def set_water_mode(mode):
         await api.async_set_water_mode_eco(settings['General'].get('hotWaterZoneId',""))
 
 @cli.command()
+@click.option('--value',
+              required=True,
+              default=None,
+              help=(('Target temperature in degrees, '
+                     'Manual override')))
+@coro
+async def set_water_temperature(value):
+    api = await get_api()
+    await api.async_set_water_comfort_setpoint(settings['General'].get('hotWaterZoneId',""),value)
+    print("water temperature changed to " + str(value))
+
+
+@cli.command()
 @coro
 async def get_schedule():
     api = await get_api()
@@ -250,14 +289,14 @@ async def get_schedule():
     data = {}
     activity = 0
     dayPrevious = 0
-    
+
     value_array = []
     time_prev = time.gmtime(0)
     round_result = 0
 
     # Data
     value_array_sunday = []
-    
+
     for block in program:
         day = block['day']
         if(day != dayPrevious):
@@ -279,9 +318,9 @@ async def get_schedule():
             value_array = []
             time_prev = time.gmtime(0)
             round_result = 0
-        
+
         time_string = block.get('time')
-        time_val = string_to_time(time_string) 
+        time_val = string_to_time(time_string)
         time_val_blocks_pre = (time_val[3] - time_prev[3] + (time_val[4]-time_prev[4])/60)*4
         time_val_blocks = round(round_result + time_val_blocks_pre)
         round_result = time_val_blocks_pre - time_val_blocks
@@ -289,7 +328,7 @@ async def get_schedule():
         value_array = value_array + add_values(time_val_blocks,activity)
         #print(time_val_blocks)
         activity = block.get('activity')
-        if(activity == 2): 
+        if(activity == 2):
             activity = 1
         else:
             activity= 0
@@ -356,11 +395,38 @@ async def set_time_program(schedule):
     api = await get_api()
     print(schedule)
     await api.async_set_schedule(settings['General'].get('climateZoneId',""),"1",schedule)
-    
+
 async def return_schedule():
     api = await get_api()
     resp = await api.async_get_schedule(settings['General'].get('climateZoneId',""),1)
     return resp
+
+@cli.command()
+@click.option('--activity',
+              required=True,
+              default=None,
+              help=(('Which activity you want to modify, '
+                     'Number of the activity [1-5]')))
+@click.option('--temperature',
+              required=True,
+              default=None,
+              help=(('Set temperature for selected activity, '
+                     'Number, temperature in degrees')))
+@coro
+async def set_activity(activity,temperature):
+    api = await get_api()
+    resp = await api.async_get_activity(settings['General'].get('climateZoneId',""))
+    print(resp[0])
+    activities_list = [
+        {"activityNumber":1,"type":"Heating","temperature":resp[0]['temperature']},
+        {"activityNumber":2,"type":"Heating","temperature":resp[1]['temperature']},
+        {"activityNumber":3,"type":"Heating","temperature":resp[2]['temperature']},
+        {"activityNumber":4,"type":"Heating","temperature":resp[3]['temperature']},
+        {"activityNumber":5,"type":"Heating","temperature":resp[4]['temperature']}
+    ]
+    activities_list[int(activity) - 1]['temperature'] = temperature
+    print(activities_list)
+    await api.async_set_activities(settings['General'].get('climateZoneId',""),activities_list)
 
 
 if not hasattr(main, '__file__'):

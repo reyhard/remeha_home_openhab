@@ -74,6 +74,9 @@ class OAuth2Session:
         #    self.config_entry, data={**self.config_entry.data, "token": new_token}
         #)
 
+    async def close_session(self):
+        await self.implementation.close_session()
+
     async def async_request(
         self, method: str, url: str, **kwargs: Any
     ) -> client.ClientResponse:
@@ -113,7 +116,8 @@ async def async_oauth2_request(
 from const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
-
+# Disables warning about unclosed connection
+logging.getLogger('asyncio').setLevel(logging.CRITICAL)
 
 class RemehaHomeAPI:
     """Provide Remeha Home authentication tied to an OAuth2 based config entry."""
@@ -148,8 +152,10 @@ class RemehaHomeAPI:
     async def async_get_dashboard(self) -> dict:
         """Return the Remeha Home dashboard JSON."""
         response = await self._async_api_request("GET", "/homes/dashboard")
+        #await self._oauth_session.close_session()
         response.raise_for_status()
-        #print(response)
+        print(response)
+        #await self._oauth_session.close_session()
         return await response.json()
 
     async def async_set_manual(self, climate_zone_id: str, setpoint: float):
@@ -211,6 +217,29 @@ class RemehaHomeAPI:
         )
         response.raise_for_status()
 
+    async def async_get_activity(self, climate_zone_id: str):
+        """Set schedule for selected time program."""
+        response = await self._async_api_request("GET",f"/climate-zones/{climate_zone_id}/activities")
+        response.raise_for_status()
+
+        return await response.json()
+
+    async def async_set_activities(self, climate_zone_id: str, activities):
+        """Set schedule for selected time program."""
+        response = await self._async_api_request(
+            "PUT",
+            f"/climate-zones/{climate_zone_id}/activities",
+            json=activities
+                # example code
+                #{"activityNumber":1,"type":"Heating","temperature":15.0},
+                #{"activityNumber":2,"type":"Heating","temperature":21.0},
+                #{"activityNumber":3,"type":"Heating","temperature":7.0},
+                #{"activityNumber":4,"type":"Heating","temperature":14.0},
+                #{"activityNumber":5,"type":"Heating","temperature":22.0}
+            ,
+        )
+        response.raise_for_status()
+
     async def async_set_water_mode_comfort(self, climate_zone_id: str):
         """Set hot water to comfort mode."""
         response = await self._async_api_request(
@@ -218,6 +247,7 @@ class RemehaHomeAPI:
             f"/hot-water-zones/{climate_zone_id}/modes/continuous-comfort",
         )
         response.raise_for_status()
+        #print(response)
 
     async def async_set_water_mode_eco(self, climate_zone_id: str):
         """Set hot water to eco mode."""
@@ -227,9 +257,20 @@ class RemehaHomeAPI:
         )
         response.raise_for_status()
 
+    async def async_set_water_comfort_setpoint(self, climate_zone_id: str, setpoint: float):
+        """Set comfort water setpoint."""
+        response = await self._async_api_request(
+            "POST",
+            f"/hot-water-zones/{climate_zone_id}/comfort-setpoint",
+            json={
+                "comfortSetpoint": setpoint,
+            },
+        )
+        response.raise_for_status()
+        
     async def async_end_session(self):
-        """Generate a url for the user to authorize."""
-        self._oauth_session.close()
+        """End user session."""
+        await self._oauth_session.close_session()
         print("Close")
 
     async def async_get_consumption_history(self,appliance_id,dateFrom,dateTo):
@@ -388,6 +429,9 @@ class RemehaHomeOAuth2Implementation():
         """Generate a url for the user to authorize."""
         return ""
 
+    async def close_session(self):
+        await self._session.close()
+    
     async def _async_request_new_token(self, grant_params):
         """Call the OAuth2 token endpoint with specific grant paramters."""
         with async_timeout.timeout(30):
